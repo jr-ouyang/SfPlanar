@@ -1,0 +1,354 @@
+"""
+Execute snakemake by 
+    cd <folder containing this Snakefile>
+    mamba activate sfplanar
+    snakemake --profile ../slurm_profile --dry-run > dry_run.out
+    nohup snakemake --profile ../slurm_profile > snakemake_test.out 2>&1 &
+    nohup snakemake --profile ../slurm_profile > snakemake_remaining.out 2>&1 &
+
+If something goes wrong and you want to kill the snakemake process on the login node
+    # find the snakemake process ID
+    ps -u "$USER" -o pid,lstart,etime,cmd | grep '[s]nakemake'
+    # kill the process by its ID (-9 means force kill)
+    kill -9 <PID>
+
+If you want to kill all processes owned by you whose full command line contains "snakemake"
+    pkill -9 -u "$USER" -f snakemake
+"""
+
+
+# Seeds from concatenating pairs of consecutive two-digit primes.
+SEED_FLOW_INIT = [
+    1113,
+    # 1719,
+    # 2329,
+    # 3137,
+    # 4143,
+    # 4753,
+    # 5961,
+    # 6771,
+    # 7379,
+    # 8389,
+]
+
+
+FILENAME_PATTERN = "layers_{num_layers}-seed_{seed_flow_init}"
+
+def planar_path_pattern(output_type):
+    return f"results/Planar-{{flow_type}}/{output_type}/{FILENAME_PATTERN}_.{output_type}"
+
+def cnf_path_pattern(output_type):
+    return f"results/CNF/{output_type}/{FILENAME_PATTERN}_.{output_type}"
+
+def syl_path_pattern(output_type):
+    return f"results/Syl-{{num_ortho_vecs}}/{output_type}/{FILENAME_PATTERN}_.{output_type}"
+
+def iaf_path_pattern(output_type):
+    return f"results/IAF-{{hidden_dim}}/{output_type}/{FILENAME_PATTERN}_.{output_type}"
+
+
+
+
+num_layers_Planar = [100, 135, 170, 205, 240]
+# num_layers_Planar = [100, 240]
+csv_Planar = expand(
+    planar_path_pattern("csv"),
+    flow_type = ["New", "Old"],
+    num_layers = num_layers_Planar,
+    seed_flow_init = SEED_FLOW_INIT
+)
+
+
+num_layers_CNF = [68, 91, 114, 137, 161]
+# num_layers_CNF = [68, 161]
+csv_CNF = expand(
+    cnf_path_pattern("csv"),
+    num_layers = num_layers_CNF,
+    seed_flow_init = SEED_FLOW_INIT
+)
+
+
+num_layers_Syl = [10, 15, 18, 21, 24]
+# num_layers_Syl = [10, 24]
+csv_Syl = expand(
+    syl_path_pattern("csv"),
+    num_ortho_vecs = [12],
+    num_layers = num_layers_Syl,
+    seed_flow_init = SEED_FLOW_INIT
+)
+
+
+num_layers_IAF = [3, 4, 5, 6]
+# num_layers_IAF = [3, 6]
+csv_IAF = expand(
+    iaf_path_pattern("csv"),
+    hidden_dim = [200],
+    num_layers = num_layers_IAF,
+    seed_flow_init = SEED_FLOW_INIT
+)
+
+
+
+############################################################################
+
+rule all:
+    input:
+        csv_Planar,
+        csv_CNF,
+        csv_Syl,
+        csv_IAF
+
+
+# Centralized SLURM resource settings for each rule
+#     train on CPU, evaluate on GPU, except for CNF, which runs on GPU for all
+PARTITION_RELATED = {
+    "Planar": {
+        "train": {"slurm_partition": "fos", 
+                  "qos": "fos"},
+        "eval":  {"slurm_partition": "fos-gpu-l40s", 
+                  "qos": "fos", 
+                  "gres": "gpu:1"},
+    },
+    "CNF": {
+        "train": {"slurm_partition": "fos-gpu-l40s", 
+                  "qos": "fos", 
+                  "gres": "gpu:1"},
+        "eval":  {"slurm_partition": "fos-gpu-l40s", 
+                  "qos": "fos", 
+                  "gres": "gpu:1"},
+    },
+    "Syl": {
+        "train": {"slurm_partition": "fos", 
+                  "qos": "fos"},
+        "eval":  {"slurm_partition": "fos-gpu-l40s", 
+                  "qos": "fos", 
+                  "gres": "gpu:1"},
+    },
+    "IAF": {
+        "train": {"slurm_partition": "fos", 
+                  "qos": "fos"},
+        "eval":  {"slurm_partition": "fos-gpu-l40s", 
+                  "qos": "fos", 
+                  "gres": "gpu:1"},
+    },
+}
+RUNTIMES = {
+    "Planar": {"train": 60 * 24, "eval": 60 * 2},
+    "CNF":    {"train": 60 * 30, "eval": 60 * 30},
+    "Syl":    {"train": 60 * 48, "eval": 60 * 12},
+    "IAF":    {"train": 60 * 24, "eval": 60 * 2},
+}
+
+TRAIN_MEM_MB    = 1000 * 10
+EVALUATE_MEM_MB = 1000 * 5
+
+def filename_pattern(wc):
+    return FILENAME_PATTERN.format(
+        num_layers=wc.num_layers, 
+        seed_flow_init=wc.seed_flow_init
+    )
+
+
+def train_shell_command(flow_type):
+    return f"""
+    mkdir -p \"$(dirname {{params.log_prefix:q}})\"
+    exec > {{params.log_prefix:q}}-job_${{{{SLURM_JOB_ID}}}}.out 2>&1
+
+    set +e
+
+    python -u expt_VAE_train.py \
+        --output_path {{output:q}} \
+        --flow_type {flow_type} \
+        --num_layers {{wildcards.num_layers:q}} \
+        --seed_flow_init {{wildcards.seed_flow_init:q}}
+    
+    exit_code=$?
+
+    my-job-stats -a -n -s
+
+    exit $exit_code
+    """
+
+
+def evaluate_shell_command(flow_type):
+    return f"""
+    mkdir -p \"$(dirname {{params.log_prefix:q}})\"
+    exec > {{params.log_prefix:q}}-job_${{{{SLURM_JOB_ID}}}}.out 2>&1
+
+    set +e
+
+    python -u expt_VAE_eval.py \
+        --input_path {{input:q}} \
+        --output_path {{output:q}} \
+        --flow_type {flow_type} \
+        --num_layers {{wildcards.num_layers:q}} \
+        --seed_flow_init {{wildcards.seed_flow_init:q}}
+    
+    exit_code=$?
+
+    my-job-stats -a -n -s
+
+    exit $exit_code
+    """
+
+
+
+################################################################### Planar
+
+rule train_Planar:
+    output: 
+        planar_path_pattern("pt"),
+    resources:
+        runtime = RUNTIMES["Planar"]["train"],
+        mem_mb = TRAIN_MEM_MB,
+        **PARTITION_RELATED["Planar"]["train"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/Planar-{wc.flow_type}/out/"
+            f"train-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        train_shell_command("{wildcards.flow_type:q}")
+
+
+rule evaluate_Planar:
+    input:
+        planar_path_pattern("pt")
+    output: 
+        planar_path_pattern("csv")
+    resources:
+        runtime = RUNTIMES["Planar"]["eval"],
+        mem_mb = EVALUATE_MEM_MB,
+        **PARTITION_RELATED["Planar"]["eval"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/Planar-{wc.flow_type}/out/"
+            f"eval-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        evaluate_shell_command("{wildcards.flow_type:q}")
+
+
+################################################################### CNF
+
+rule train_CNF:
+    output: 
+        cnf_path_pattern("pt"),
+    resources:
+        runtime = RUNTIMES["CNF"]["train"],
+        mem_mb = TRAIN_MEM_MB,
+        **PARTITION_RELATED["CNF"]["train"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/CNF/out/"
+            f"train-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        train_shell_command("CNF")
+
+
+rule evaluate_CNF:
+    input:
+        cnf_path_pattern("pt"),
+    output: 
+        cnf_path_pattern("csv")
+    resources:
+        runtime = RUNTIMES["CNF"]["eval"],
+        mem_mb = EVALUATE_MEM_MB,
+        **PARTITION_RELATED["CNF"]["eval"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/CNF/out/"
+            f"eval-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        evaluate_shell_command("CNF")
+
+
+################################################################### Syl
+
+rule train_Syl:
+    output: 
+        syl_path_pattern("pt"),
+    resources:
+        runtime = RUNTIMES["Syl"]["train"],
+        mem_mb = TRAIN_MEM_MB,
+        **PARTITION_RELATED["Syl"]["train"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/Syl-{wc.num_ortho_vecs}/out/"
+            f"train-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        train_shell_command("Syl")
+
+
+rule evaluate_Syl:
+    input:
+        syl_path_pattern("pt")
+    output: 
+        syl_path_pattern("csv")
+    resources:
+        runtime = RUNTIMES["Syl"]["eval"],
+        mem_mb = EVALUATE_MEM_MB,
+        **PARTITION_RELATED["Syl"]["eval"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/Syl-{wc.num_ortho_vecs}/out/"
+            f"eval-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        evaluate_shell_command("Syl")
+
+
+################################################################### IAF
+
+rule train_IAF:
+    output: 
+        iaf_path_pattern("pt"),
+    resources:
+        runtime = RUNTIMES["IAF"]["train"],
+        mem_mb = TRAIN_MEM_MB,
+        **PARTITION_RELATED["IAF"]["train"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/IAF-{wc.hidden_dim}/out/"
+            f"train-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        train_shell_command("IAF")
+
+
+rule evaluate_IAF:
+    input:
+        iaf_path_pattern("pt")
+    output: 
+        iaf_path_pattern("csv")
+    resources:
+        runtime = RUNTIMES["IAF"]["eval"],
+        mem_mb = EVALUATE_MEM_MB,
+        **PARTITION_RELATED["IAF"]["eval"]
+    params:
+        log_prefix = lambda wc: (
+            f"results/IAF-{wc.hidden_dim}/out/"
+            f"eval-{filename_pattern(wc)}"
+        )
+    conda:
+        "sfplanar"
+    shell:
+        evaluate_shell_command("IAF")
+

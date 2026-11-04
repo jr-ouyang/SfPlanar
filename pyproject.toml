@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sfplanar"
+version = "0.1.0"
+description = "Simulation Tools for Variational Inference with Singularity-Free Planar Flows"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+  { name = "J. Ouyang", email = "ouyang@outlook.com.au" }
+]
+dependencies = [
+  "numpy>=2.4",
+  "torch==2.6.0",
+  "torchvision==0.21.0",
+  "lightning==2.6.1",
+  "scikit_learn>=1.8.0",
+  "torchode>=1.0.0",
+
+  # Optional: for Slurm workflow management
+  "snakemake==9.20.0",
+  "snakemake-executor-plugin-slurm==2.6.1",
+
+  # Optional: for post-simulation analysis and visualization
+  "jupyterlab>=4.4.10",
+  "nbstripout>=0.8.1",
+  "pandas>=2.3",
+  "seaborn>=0.13.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest", 
+]             
+
+[tool.setuptools.packages.find]
+where = ["src"]                          # Look for packages inside src/

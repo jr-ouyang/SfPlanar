@@ -1,0 +1,82 @@
+"""
+Execute snakemake by 
+    cd <folder containing this Snakefile>
+    mamba activate sfplanar
+    snakemake --profile ../slurm_profile --dry-run > dry_run.out
+    nohup snakemake --profile ../slurm_profile > snakemake_first_3.out 2>&1 &
+    nohup snakemake --profile ../slurm_profile > snakemake_remaining_497.out 2>&1 &
+
+If something goes wrong and you want to kill the snakemake process on the login node
+    # find the snakemake process ID
+    ps -u "$USER" -o pid,lstart,etime,cmd | grep '[s]nakemake'
+    # kill the process by its ID (-9 means force kill)
+    kill -9 <PID>
+
+If you want to kill all processes owned by you whose full command line contains "snakemake"
+    pkill -9 -u "$USER" -f snakemake
+"""
+
+
+Replicate_Range = range(3)         # run 3 replicates for testing
+# Replicate_Range = range(3, 500)
+
+def path_pattern(output_type):
+    return f"results/{output_type}/{{replicate}}_.{output_type}"
+csv = expand(
+    path_pattern("csv"),
+    replicate = Replicate_Range
+)
+pt = expand(
+    path_pattern("pt"),
+    replicate = Replicate_Range
+)
+
+
+############################################################################
+
+RESOURCES = {
+    # "partition_related": {"slurm_partition": "fos", "qos": "fos"},
+    "partition_related": {"slurm_partition": "sapphire"},
+    "runtime": 60 * 24,   # 24 hours
+    "mem_mb": 1000 * 8,   # 8 GB
+}
+
+
+rule all:
+    input:
+        csv,
+        pt,
+
+
+rule toy:
+    output: 
+        csv = path_pattern("csv"),
+        pt = path_pattern("pt"),
+    resources:
+        **RESOURCES["partition_related"],
+        runtime = RESOURCES["runtime"],
+        mem_mb = RESOURCES["mem_mb"],
+    params:
+        log_prefix = lambda wc: f"results/out/{wc.replicate}"
+    conda:
+        "sfplanar"
+    shell:
+        """
+        mkdir -p \"$(dirname {params.log_prefix:q})\"
+        exec > {params.log_prefix:q}-job_${{SLURM_JOB_ID}}.out 2>&1
+
+        set +e
+
+        python -u expt_Toy.py \
+            --output_path_csv {output.csv:q} \
+            --output_path_pt {output.pt:q} \
+            --replicate {wildcards.replicate:q}
+        
+        exit_code=$?
+
+        my-job-stats -a -n -s
+
+        exit $exit_code
+        """
+
+

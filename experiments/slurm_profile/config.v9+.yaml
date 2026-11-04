@@ -1,0 +1,8 @@
+executor: slurm
+
+jobs: 666
+use-conda: True
+
+default-resources:
+  slurm_account: "punim****"
+
